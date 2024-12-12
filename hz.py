@@ -49,18 +49,12 @@ def hz(image_path, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.7
     for i in range(start_scale, n_scales + 1):
         rd = int(max(1, np.ceil( 3 * d_scale[i])))
         hd = 2 * rd + 1
-
-        dx_d = v2.Pad(padding=rd, padding_mode='reflect')(dx)
-        dy_d = v2.Pad(padding=rd, padding_mode='reflect')(dy)
         
-        dx_d = v2.GaussianBlur(kernel_size=hd, sigma=d_scale[i])(dx_d)[:, rd:-rd, rd:-rd]
-        dy_d = v2.GaussianBlur(kernel_size=hd, sigma=d_scale[i])(dy_d)[:, rd:-rd, rd:-rd]
+        dx_d = v2.GaussianBlur(kernel_size=hd, sigma=d_scale[i])(dx)
+        dy_d = v2.GaussianBlur(kernel_size=hd, sigma=d_scale[i])(dy)
 
         dm = (dx_d**2 + dy_d**2)**0.5;
-
-        dm_mask = (dm > dm.mean()).to(torch.float)
-        dm_mask = v2.Pad(padding=rd, padding_mode='reflect')(dm_mask)
-        dm_mask = v2.GaussianBlur(kernel_size=hd, sigma=d_scale[i])(dm_mask)[:, rd:-rd, rd:-rd]
+        dm_mask = v2.GaussianBlur(kernel_size=hd, sigma=d_scale[i])((dm > dm.mean()).to(torch.float))
 
         dx_d = dx_d * dm_mask
         dy_d = dy_d * dm_mask
@@ -68,14 +62,9 @@ def hz(image_path, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.7
         ri = int(max(1, np.ceil(3 * i_scale[i])))
         hi = 2 * ri + 1
 
-        dxy = v2.Pad(padding=ri, padding_mode='reflect')(dx_d * dy_d)
-        dxy = v2.GaussianBlur(kernel_size=hi, sigma=i_scale[i])(dxy)[:, ri:-ri, ri:-ri]
-
-        dx2 = v2.Pad(padding=ri, padding_mode='reflect')(dx_d * dx_d)
-        dx2 = v2.GaussianBlur(kernel_size=hi, sigma=i_scale[i])(dx2)[:, ri:-ri, ri:-ri]
-
-        dy2 = v2.Pad(padding=ri, padding_mode='reflect')(dy_d * dy_d)
-        dy2 = v2.GaussianBlur(kernel_size=hi, sigma=i_scale[i])(dy2)[:, ri:-ri, ri:-ri]
+        dxy = v2.GaussianBlur(kernel_size=hi, sigma=i_scale[i])(dx_d * dy_d)
+        dx2 = v2.GaussianBlur(kernel_size=hi, sigma=i_scale[i])(dx_d**2)
+        dy2 = v2.GaussianBlur(kernel_size=hi, sigma=i_scale[i])(dy_d**2)
 
         harris = zscore(dx2 * dy2 - dxy**2) - zscore((dx2 + dy2)**2)
     return
