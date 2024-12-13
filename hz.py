@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import cv2
 from PIL import Image
+import matplotlib.pyplot as plt 
 import torchvision.transforms as transforms
 from torchvision.transforms import v2
 
@@ -69,7 +70,7 @@ def max_mask(img, rd, dm_mask, rad_max=3):
 def sub_pix(img, kp):
     kp_sp = kp.type(torch.float)
     
-    r_mask = (kp[:,0] > 1) & (kp[:, 0] < img.shape[1] - 1)
+    r_mask = (kp[:,0] > 1) & (kp[:, 0] < img.shape[0] - 1)
 
     v  = img.flatten()[ kp[r_mask, 0]      * img.shape[2] + kp[r_mask, 1]]
     vl = img.flatten()[(kp[r_mask, 0] - 1) * img.shape[2] + kp[r_mask, 1]]
@@ -77,7 +78,7 @@ def sub_pix(img, kp):
 
     kp_sp[r_mask, 0] = kp[r_mask, 0] + (vr - vl) / (2 * (2*v - vl -vr))    
 
-    c_mask = (kp[:,1] > 1) & (kp[:, 1] < img.shape[0] - 1)
+    c_mask = (kp[:,1] > 1) & (kp[:, 1] < img.shape[1] - 1)
 
     v  = img.flatten()[kp[c_mask, 0] * img.shape[2] + kp[c_mask, 1]    ]
     vl = img.flatten()[kp[c_mask, 0] * img.shape[2] + kp[c_mask, 1] - 1]
@@ -88,10 +89,28 @@ def sub_pix(img, kp):
     return kp_sp
     
 
-def hz(image_path, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_scales=9, start_scale=3, dm_th=0.31, cf=3):
-    img = load_to_tensor(image_path, grayscale=True).to(torch.float)
+def get_eli(dx2, dy2, dxy, scale):
+    U = torch.zeros((dx2.shape[0], 2, 2), device=device)
+    U[:, 0, 0] = dx2
+    U[:, 0, 1] = dxy
+    U[:, 1, 0] = dxy
+    U[:, 1, 1] = dy2
+    D, V = torch.linalg.eigh(U)
+    D = 1 / D**0.5
+    D = D / D[:, 0].unsqueeze(-1)    
+    kp_ratio = torch.minimum(D[:, 0], D[:, 1])
+    D = D * scale
+    D_ = torch.zeros((dx2.shape[0], 2, 2), device=device)
+    D_[:, 0, 0] = 1/ D[:, 0]**2
+    D_[:, 1, 1] = 1/ D[:, 1]**2
+    U_ = V @ D_ @ V.transpose(1, 2) 
+    kp_eli = torch.stack((U_[:, 0, 0], U_[:, 0, 1], U_[:, 1, 1]), dim=1)    
 
-    kpt = []
+    return kp_eli, kp_ratio
+
+
+def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_scales=9, start_scale=3, dm_th=0.31, cf=3):
+    kpt = torch.zeros((0,9), device=device)
     i_scale = scale_base ** np.arange(0, n_scales+1)
     d_scale = i_scale * scale_ratio
     dx, dy = derivative(img)
@@ -118,9 +137,33 @@ def hz(image_path, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.7
 
         harris = zscore(dx2 * dy2 - dxy**2) - zscore((dx2 + dy2)**2)
         
-        kp = max_mask(harris, rd, dm_mask > dm_th)        
+        kp = max_mask(harris, rd, dm_mask > dm_th)
+        
+        if kp.shape[0] == 0:
+            continue
+        
         kp_sub_pix = sub_pix(harris, kp)
-    return
+        kp_s = torch.tensor([i, d_scale[i], i_scale[i]], device=device).repeat(kp.shape[0], 1)
+        
+        kp_index = kp[:, 0] * harris.shape[2] + kp[:, 1]
+        kp_eli, kp_ratio = get_eli(dx2.flatten()[kp_index],dy2.flatten()[kp_index],dxy.flatten()[kp_index],i_scale[i] * cf)
+        
+        kpt_ = torch.cat((kp_sub_pix[:,[1, 0]], kp_eli, kp_s, kp_ratio.unsqueeze(-1)), dim=1)
+        kp_good = 1 - kp_ratio < scale_th
+ 
+        kpt = torch.cat((kpt, kpt_[kp_good]))
+
+    aux = torch.linalg.inv(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2))
+    kpt[:, 2:5] = aux.reshape(-1, 4)[:, [0, 1, 3]]
+
+    kpt_vl = kpt[:, :5]
+    return kpt_vl.transpose(0,1).to('cpu').numpy() 
 
 if __name__ == '__main__':
-    pts = hz('images/graf5.png')
+    image = 'images/graf5.png'
+
+    img = load_to_tensor(image, grayscale=True).to(torch.float)
+    pts = hz(img)
+
+    img = cv2.cvtColor(cv2.imread(image), cv2.COLOR_BGR2RGB)    
+    
