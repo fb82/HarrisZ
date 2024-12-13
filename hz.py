@@ -37,6 +37,56 @@ def zscore(im):
         
     return z
 
+def max_mask(img, rd, dm_mask, rad_max=3):
+    rad = min(rad_max, max(1, round(rd / np.sqrt(2))));
+    k = 2 * rad + 1
+
+    max_img = torch.nn.MaxPool2d(k, stride=1, padding=rad)(img) == img
+    unique_max_img = ((torch.nn.AvgPool2d(k, stride=1, padding=rad)(max_img.type(torch.float)) * k**2) == 1) & max_img
+    ismax = unique_max_img & (img > 0) & dm_mask
+
+    rc = torch.argwhere(ismax)
+    if rc.shape[0] == 0:
+        return torch.zeros((0,2), device=device, dtype=torch.int)
+    
+    rc_flat_index = rc[:, 1] * img.shape[2] + rc[:, 2]
+    max_val = img.flatten()[rc_flat_index]
+    sidx = torch.argsort(max_val, descending=True)
+    rc = rc[sidx, 1:]    
+
+    m = torch.cdist(rc.type(torch.float), rc.type(torch.float))
+    m_idx = torch.full((rc.shape[0],), -1, device=device, dtype=torch.int)
+    m_idx[0] = 0
+    m_n = 1
+    for i in range(1,m_idx.shape[0]):
+        if (m[i, m_idx[:m_n]] >= rd).all():
+            m_n = m_n + 1
+            m_idx[i] = i
+
+    return rc[m_idx[:m_n]]
+        
+
+def sub_pix(img, kp):
+    kp_sp = kp.type(torch.float)
+    
+    r_mask = (kp[:,0] > 1) & (kp[:, 0] < img.shape[1] - 1)
+
+    v  = img.flatten()[ kp[r_mask, 0]      * img.shape[2] + kp[r_mask, 1]]
+    vl = img.flatten()[(kp[r_mask, 0] - 1) * img.shape[2] + kp[r_mask, 1]]
+    vr = img.flatten()[(kp[r_mask, 0] + 1) * img.shape[2] + kp[r_mask, 1]]
+
+    kp_sp[r_mask, 0] = kp[r_mask, 0] + (vr - vl) / (2 * (2*v - vl -vr))    
+
+    c_mask = (kp[:,1] > 1) & (kp[:, 1] < img.shape[0] - 1)
+
+    v  = img.flatten()[kp[c_mask, 0] * img.shape[2] + kp[c_mask, 1]    ]
+    vl = img.flatten()[kp[c_mask, 0] * img.shape[2] + kp[c_mask, 1] - 1]
+    vr = img.flatten()[kp[c_mask, 0] * img.shape[2] + kp[c_mask, 1] + 1]
+
+    kp_sp[c_mask, 1] = kp[c_mask, 1] + (vr - vl) / (2 * (2*v - vl -vr))    
+
+    return kp_sp
+    
 
 def hz(image_path, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_scales=9, start_scale=3, dm_th=0.31, cf=3):
     img = load_to_tensor(image_path, grayscale=True).to(torch.float)
@@ -67,6 +117,9 @@ def hz(image_path, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.7
         dy2 = v2.GaussianBlur(kernel_size=hi, sigma=i_scale[i])(dy_d**2)
 
         harris = zscore(dx2 * dy2 - dxy**2) - zscore((dx2 + dy2)**2)
+        
+        kp = max_mask(harris, rd, dm_mask > dm_th)        
+        kp_sub_pix = sub_pix(harris, kp)
     return
 
 if __name__ == '__main__':

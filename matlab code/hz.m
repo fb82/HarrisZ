@@ -101,7 +101,7 @@ for i=2:size(m_idx,1)
         m_idx(m_n)=i;
     end
 end
-rc(m_idx(1:m_n),:);
+rc=rc(m_idx(1:m_n),:);
 
 function img=zscore(img)
 
