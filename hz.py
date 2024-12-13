@@ -1,10 +1,14 @@
 import torch
 import numpy as np
-import cv2
 from PIL import Image
-import matplotlib.pyplot as plt 
 import torchvision.transforms as transforms
 from torchvision.transforms import v2
+
+import cv2
+import kornia.feature as KF
+import kornia as K
+from kornia_moons.viz import visualize_LAF
+import matplotlib.pyplot as plt
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -101,22 +105,22 @@ def get_eli(dx2, dy2, dxy, scale):
     kp_ratio = torch.minimum(D[:, 0], D[:, 1])
     D = D * scale
     D_ = torch.zeros((dx2.shape[0], 2, 2), device=device)
-    D_[:, 0, 0] = 1/ D[:, 0]**2
-    D_[:, 1, 1] = 1/ D[:, 1]**2
+    D_[:, 0, 0] = 1 / D[:, 0]**2
+    D_[:, 1, 1] = 1 / D[:, 1]**2
     U_ = V @ D_ @ V.transpose(1, 2) 
     kp_eli = torch.stack((U_[:, 0, 0], U_[:, 0, 1], U_[:, 1, 1]), dim=1)    
 
     return kp_eli, kp_ratio
 
 
-def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_scales=9, start_scale=3, dm_th=0.31, cf=3):
+def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_scales=9, start_scale=3, dm_th=0.31, cf=3, output_format='vgg'):
     kpt = torch.zeros((0,9), device=device)
     i_scale = scale_base ** np.arange(0, n_scales+1)
     d_scale = i_scale * scale_ratio
     dx, dy = derivative(img)
 
     for i in range(start_scale, n_scales + 1):
-        rd = int(max(1, np.ceil( 3 * d_scale[i])))
+        rd = int(max(1, np.ceil(3 * d_scale[i])))
         hd = 2 * rd + 1
         
         dx_d = v2.GaussianBlur(kernel_size=hd, sigma=d_scale[i])(dx)
@@ -146,24 +150,28 @@ def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_sc
         kp_s = torch.tensor([i, d_scale[i], i_scale[i]], device=device).repeat(kp.shape[0], 1)
         
         kp_index = kp[:, 0] * harris.shape[2] + kp[:, 1]
-        kp_eli, kp_ratio = get_eli(dx2.flatten()[kp_index],dy2.flatten()[kp_index],dxy.flatten()[kp_index],i_scale[i] * cf)
+        kp_eli, kp_ratio = get_eli(dx2.flatten()[kp_index],dy2.flatten()[kp_index],dxy.flatten()[kp_index], i_scale[i] * cf)
         
         kpt_ = torch.cat((kp_sub_pix[:,[1, 0]], kp_eli, kp_s, kp_ratio.unsqueeze(-1)), dim=1)
         kp_good = 1 - kp_ratio < scale_th
  
         kpt = torch.cat((kpt, kpt_[kp_good]))
 
-    aux = torch.linalg.inv(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2))
-    kpt[:, 2:5] = aux.reshape(-1, 4)[:, [0, 1, 3]]
+    if output_format == 'vgg':
+        aux = torch.linalg.inv(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2))
+        kpt[:, 2:5] = aux.reshape(-1, 4)[:, [0, 1, 3]]
+    else:
+        kpt[:, 2:5] = kpt[:, 2:5] / cf
 
-    kpt_vl = kpt[:, :5]
-    return kpt_vl.transpose(0,1).to('cpu').numpy() 
+    return kpt[:, :5]
 
 if __name__ == '__main__':
     image = 'images/graf5.png'
 
     img = load_to_tensor(image, grayscale=True).to(torch.float)
-    pts = hz(img)
+    pts = hz(img, output_format='laf')
 
-    img = cv2.cvtColor(cv2.imread(image), cv2.COLOR_BGR2RGB)    
-    
+    img = cv2.cvtColor(cv2.imread(image), cv2.COLOR_BGR2RGB)
+    lafs = KF.ellipse_to_laf(pts[None])     
+    visualize_LAF(K.image_to_tensor(img, False), lafs, 0, return_fig_ax=True)    
+    plt.savefig('harrisz_pytorch.pdf', dpi = 150, bbox_inches='tight')

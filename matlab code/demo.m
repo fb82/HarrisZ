@@ -4,7 +4,7 @@ function demo
 % tested on Ubuntu 20.04
 
 % you must have vlfeat installed for visualization, path must be set here 
-vlfeat_path=[];
+vlfeat_path='';
 if isempty(vlfeat_path)
     disp('vlfeat path not set in demo.m, no ellipses in the output visualization')
 else
