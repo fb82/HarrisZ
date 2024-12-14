@@ -4,14 +4,15 @@ from PIL import Image
 import torchvision.transforms as transforms
 from torchvision.transforms import v2
 
-import cv2
-import kornia.feature as KF
-import kornia as K
-from kornia_moons.viz import visualize_LAF
 import matplotlib.pyplot as plt
+from matplotlib.patches import Ellipse
+# import cv2
+# import kornia.feature as KF
+# import kornia as K
+# from kornia_moons.viz import visualize_LAF
+# import matplotlib.pyplot as plt
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 
 def load_to_tensor(image_path, grayscale=False):
     image = Image.open(image_path)
@@ -160,18 +161,42 @@ def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_sc
     if output_format == 'vgg':
         aux = torch.linalg.inv(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2))
         kpt[:, 2:5] = aux.reshape(-1, 4)[:, [0, 1, 3]]
-    else:
+        return kpt[:, :5]
+    elif output_format == 'laf':
         kpt[:, 2:5] = kpt[:, 2:5] / cf
-
-    return kpt[:, :5]
+        return kpt[:, :5]        
+    else:
+        xy = kpt[:, :2]
+        D, V = torch.linalg.eigh(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2))
+        Aa = (cf / D)**0.5
+        angle = torch.acos(V[:, 0, 0]) * 180 / np.pi
+        return xy, Aa, angle
 
 if __name__ == '__main__':
     image = 'images/graf5.png'
 
     img = load_to_tensor(image, grayscale=True).to(torch.float)
-    pts = hz(img, output_format='laf')
+    pts, eli_axes, eli_rot = hz(img, output_format='eli')
+    
+    fig, ax = plt.subplots(subplot_kw={"aspect": "equal"})
+    plt.axis('off')
+    plt.imshow(Image.open(image))
+    pts = pts.to('cpu').numpy()
+    eli_axes = eli_axes.to('cpu').numpy()
+    eli_rot = eli_rot.to('cpu').numpy()
 
-    img = cv2.cvtColor(cv2.imread(image), cv2.COLOR_BGR2RGB)
-    lafs = KF.ellipse_to_laf(pts[None])     
-    visualize_LAF(K.image_to_tensor(img, False), lafs, 0, return_fig_ax=True)    
-    plt.savefig('harrisz_pytorch.pdf', dpi = 150, bbox_inches='tight')
+    plt.plot(pts[:, 0], pts[:, 1], linestyle='', color='b', marker='.', markersize=1)
+    for i in range(pts.shape[0]):
+        eli = Ellipse(xy=(pts[i, 0], pts[i, 1]), width=eli_axes[i, 0], height=eli_axes[i, 1], angle=eli_rot[i], facecolor='none', edgecolor='b', linewidth=0.5)
+        ax.add_patch(eli)
+
+    plt.savefig('harrisz_pytorch_eli.pdf', dpi = 150, bbox_inches='tight')
+
+    # img = load_to_tensor(image, grayscale=True).to(torch.float)
+    # pts = hz(img, output_format='laf')
+
+    # img = cv2.cvtColor(cv2.imread(image), cv2.COLOR_BGR2RGB)
+    # lafs = KF.ellipse_to_laf(pts[None])     
+    # visualize_LAF(K.image_to_tensor(img, False), lafs, 0, return_fig_ax=True)
+    
+    # plt.savefig('harrisz_pytorch_laf.pdf', dpi = 150, bbox_inches='tight')
