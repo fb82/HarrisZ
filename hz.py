@@ -5,6 +5,9 @@ from PIL import Image
 import torchvision.transforms as transforms
 from torchvision.transforms import v2
 
+# for demo
+import sys
+
 # for visualization
 import time
 import matplotlib.pyplot as plt
@@ -20,6 +23,9 @@ try:
     kornia_on = True
 except:
     kornia_on = False
+    import warnings
+    warnings.warn("Kornia e Kornia-Moons not found: skipping the related demo part")    
+    
     
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -189,6 +195,10 @@ if __name__ == '__main__':
     # example image
     image = 'images/graf5.png'
 
+    # a diffent image can be passed to the demo script
+    if len(sys.argv) > 1:
+        image = sys.argv[1]
+                
     # standalone usage
     img = load_to_tensor(image, grayscale=True).to(torch.float)
     start = time.time()
