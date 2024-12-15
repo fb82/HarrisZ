@@ -6,12 +6,16 @@ from torchvision.transforms import v2
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse
-# import cv2
-# import kornia.feature as KF
-# import kornia as K
-# from kornia_moons.viz import visualize_LAF
-# import matplotlib.pyplot as plt
 
+try:
+    import kornia as K
+    import kornia.feature as KF
+    from kornia_moons.viz import visualize_LAF
+    import cv2
+    kornia_on = True
+except:
+    kornia_on = False
+    
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def load_to_tensor(image_path, grayscale=False):
@@ -24,11 +28,8 @@ def load_to_tensor(image_path, grayscale=False):
     return transform(image).to(device)
 
 def derivative(img):
-    dx = torch.zeros(img.shape, device=device, dtype=torch.float)    
-    dy = torch.zeros(img.shape, device=device, dtype=torch.float)    
-
-    dx[:, 1:img.shape[1]-1, 1:img.shape[2]-1] = img[:, 1:img.shape[1]-1, :img.shape[2]-2] - img[:, 1:img.shape[1]-1, 2:img.shape[2]] 
-    dy[:, 1:img.shape[1]-1, 1:img.shape[2]-1] = img[:, :img.shape[1]-2, 1:img.shape[2]-1] - img[:, 2:img.shape[1], 1:img.shape[2]-1] 
+    dx = torch.nn.functional.pad(img[:, 1:img.shape[1]-1, :img.shape[2]-2] - img[:, 1:img.shape[1]-1, 2:img.shape[2]],(1,1,1,1,0,0), mode='constant', value=0) 
+    dy = torch.nn.functional.pad(img[:, :img.shape[1]-2, 1:img.shape[2]-1] - img[:, 2:img.shape[1], 1:img.shape[2]-1],(1,1,1,1,0,0), mode='constant', value=0) 
 
     return dx, dy
 
@@ -39,7 +40,7 @@ def zscore(im):
     if not (s==0):
         z = (im - torch.mean(im)) / s
     else:
-        z[:] = 0
+        z = torch.zeros_like(im)
         
     return z
 
@@ -76,40 +77,29 @@ def sub_pix(img, kp):
     kp_sp = kp.type(torch.float)
     
     r_mask = (kp[:,0] > 1) & (kp[:, 0] < img.shape[0] - 1)
-
     v  = img.flatten()[ kp[r_mask, 0]      * img.shape[2] + kp[r_mask, 1]]
     vl = img.flatten()[(kp[r_mask, 0] - 1) * img.shape[2] + kp[r_mask, 1]]
     vr = img.flatten()[(kp[r_mask, 0] + 1) * img.shape[2] + kp[r_mask, 1]]
-
     kp_sp[r_mask, 0] = kp[r_mask, 0] + (vr - vl) / (2 * (2*v - vl -vr))    
 
     c_mask = (kp[:,1] > 1) & (kp[:, 1] < img.shape[1] - 1)
-
     v  = img.flatten()[kp[c_mask, 0] * img.shape[2] + kp[c_mask, 1]    ]
     vl = img.flatten()[kp[c_mask, 0] * img.shape[2] + kp[c_mask, 1] - 1]
     vr = img.flatten()[kp[c_mask, 0] * img.shape[2] + kp[c_mask, 1] + 1]
-
     kp_sp[c_mask, 1] = kp[c_mask, 1] + (vr - vl) / (2 * (2*v - vl -vr))    
 
     return kp_sp
     
 
 def get_eli(dx2, dy2, dxy, scale):
-    U = torch.zeros((dx2.shape[0], 2, 2), device=device)
-    U[:, 0, 0] = dx2
-    U[:, 0, 1] = dxy
-    U[:, 1, 0] = dxy
-    U[:, 1, 1] = dy2
+    U = torch.stack((dx2, dxy, dxy, dy2), dim=-1).reshape(-1, 2, 2)    
     D, V = torch.linalg.eigh(U)
     D = 1 / D**0.5
-    D = D / D[:, 0].unsqueeze(-1)    
+    D = D / D[:, 0].unsqueeze(-1)
     kp_ratio = torch.minimum(D[:, 0], D[:, 1])
-    D = D * scale
-    D_ = torch.zeros((dx2.shape[0], 2, 2), device=device)
-    D_[:, 0, 0] = 1 / D[:, 0]**2
-    D_[:, 1, 1] = 1 / D[:, 1]**2
-    U_ = V @ D_ @ V.transpose(1, 2) 
-    kp_eli = torch.stack((U_[:, 0, 0], U_[:, 0, 1], U_[:, 1, 1]), dim=1)    
+    D = torch.diag_embed(1 / (D * scale)**2)
+    U = V @ D @ V.transpose(1, 2) 
+    kp_eli = torch.stack((U[:, 0, 0], U[:, 0, 1], U[:, 1, 1]), dim=1)    
 
     return kp_eli, kp_ratio
 
@@ -120,7 +110,7 @@ def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_sc
     d_scale = i_scale * scale_ratio
     dx, dy = derivative(img)
 
-    for i in range(start_scale, n_scales + 1):
+    for i in range(start_scale, n_scales):        
         rd = int(max(1, np.ceil(3 * d_scale[i])))
         hd = 2 * rd + 1
         
@@ -158,45 +148,61 @@ def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_sc
  
         kpt = torch.cat((kpt, kpt_[kp_good]))
 
+    # kpt = torch.tensor(np.loadtxt("hz_pts.txt"), device=device)
+
     if output_format == 'vgg':
-        aux = torch.linalg.inv(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2))
-        kpt[:, 2:5] = aux.reshape(-1, 4)[:, [0, 1, 3]]
+        kpt[:, 2:5] = torch.linalg.inv(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2)).reshape(-1, 4)[:, [0, 1, 3]]
         return kpt[:, :5]
     elif output_format == 'laf':
         kpt[:, 2:5] = kpt[:, 2:5] / cf
         return kpt[:, :5]        
     else:
-        xy = kpt[:, :2]
         D, V = torch.linalg.eigh(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2))
-        Aa = (cf / D)**0.5
-        angle = torch.acos(V[:, 0, 0]) * 180 / np.pi
-        return xy, Aa, angle
+        center = kpt[:, :2]
+        axes = (cf / D)**0.5
+        rotation = torch.acos(V[:, 0, 0]) * 180 / np.pi
+        return {'center': center, 'axes': axes, 'rotation': rotation}
 
-if __name__ == '__main__':
-    image = 'images/graf5.png'
-
-    img = load_to_tensor(image, grayscale=True).to(torch.float)
-    pts, eli_axes, eli_rot = hz(img, output_format='eli')
-    
-    fig, ax = plt.subplots(subplot_kw={"aspect": "equal"})
+def plot_hz_eli(image, kpts, save_to='harrisz_pytorch_eli.pdf', dpi=150, c_color='b', c_marker='.', markersize=1, e_color='b', linewidth=0.5):
+    plt.figure()
     plt.axis('off')
     plt.imshow(Image.open(image))
-    pts = pts.to('cpu').numpy()
-    eli_axes = eli_axes.to('cpu').numpy()
-    eli_rot = eli_rot.to('cpu').numpy()
 
-    plt.plot(pts[:, 0], pts[:, 1], linestyle='', color='b', marker='.', markersize=1)
+    pts = kpts['center'].to('cpu').numpy()
+    eli_axes =kpts['axes'].to('cpu').numpy()
+    eli_rot = kpts['rotation'].to('cpu').numpy()
+    
+    ax = plt.gca()
+    plt.plot(pts[:, 0], pts[:, 1], linestyle='', color=c_color, marker=c_marker, markersize=markersize)
     for i in range(pts.shape[0]):
-        eli = Ellipse(xy=(pts[i, 0], pts[i, 1]), width=eli_axes[i, 0], height=eli_axes[i, 1], angle=eli_rot[i], facecolor='none', edgecolor='b', linewidth=0.5)
+        eli = Ellipse(xy=(pts[i, 0], pts[i, 1]), width=eli_axes[i, 0], height=eli_axes[i, 1], angle=eli_rot[i], facecolor='none', edgecolor=e_color, linewidth=linewidth)
         ax.add_patch(eli)
 
-    plt.savefig('harrisz_pytorch_eli.pdf', dpi = 150, bbox_inches='tight')
-
-    # img = load_to_tensor(image, grayscale=True).to(torch.float)
-    # pts = hz(img, output_format='laf')
-
-    # img = cv2.cvtColor(cv2.imread(image), cv2.COLOR_BGR2RGB)
-    # lafs = KF.ellipse_to_laf(pts[None])     
-    # visualize_LAF(K.image_to_tensor(img, False), lafs, 0, return_fig_ax=True)
+    if not(save_to is None):
+        plt.savefig(save_to, dpi=dpi, bbox_inches='tight')
     
-    # plt.savefig('harrisz_pytorch_laf.pdf', dpi = 150, bbox_inches='tight')
+
+if __name__ == '__main__':
+    # example image
+    image = 'images/graf5.png'
+
+    # standalone usage
+    img = load_to_tensor(image, grayscale=True).to(torch.float)
+    kpts = hz(img, output_format='eli')    
+    # show keypoints 
+    plot_hz_eli(image, kpts, save_to='harrisz_pytorch_eli.pdf')
+    
+    # with Kornia
+    if kornia_on:
+        # run and convert to laf
+        img = load_to_tensor(image, grayscale=True).to(torch.float)
+        kpts = hz(img, output_format='laf')
+        lafs = KF.ellipse_to_laf(kpts[None]) 
+
+        # show keypoints with Kornia
+        img = cv2.cvtColor(cv2.imread(image), cv2.COLOR_BGR2RGB)    
+        visualize_LAF(K.image_to_tensor(img, False), lafs, 0, return_fig_ax=True)
+        plt.axis('off')    
+
+        # save the plot        
+        plt.savefig('harrisz_pytorch_laf.pdf', dpi = 150, bbox_inches='tight')
