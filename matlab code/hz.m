@@ -10,7 +10,7 @@ cf=3;
 
 kpt=[];
 img=single(rgb2gray(im));
-i_scale=scale_base.^(0:n_scales);
+i_scale=scale_base.^(0:n_scales-1);
 d_scale=i_scale*scale_ratio;
 [dx,dy]=derivative(img);
 for i=start_scale+1:n_scales

@@ -1,17 +1,22 @@
+# for HarrisZ
 import torch
 import numpy as np
 from PIL import Image
 import torchvision.transforms as transforms
 from torchvision.transforms import v2
 
+# for visualization
+import time
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse
 
+# for Kornia
 try:
     import kornia as K
     import kornia.feature as KF
     from kornia_moons.viz import visualize_LAF
     import cv2
+    import matplotlib.pyplot as plt
     kornia_on = True
 except:
     kornia_on = False
@@ -106,7 +111,7 @@ def get_eli(dx2, dy2, dxy, scale):
 
 def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_scales=9, start_scale=3, dm_th=0.31, cf=3, output_format='vgg'):
     kpt = torch.zeros((0,9), device=device)
-    i_scale = scale_base ** np.arange(0, n_scales+1)
+    i_scale = scale_base ** np.arange(0, n_scales)
     d_scale = i_scale * scale_ratio
     dx, dy = derivative(img)
 
@@ -148,8 +153,6 @@ def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_sc
  
         kpt = torch.cat((kpt, kpt_[kp_good]))
 
-    # kpt = torch.tensor(np.loadtxt("hz_pts.txt"), device=device)
-
     if output_format == 'vgg':
         kpt[:, 2:5] = torch.linalg.inv(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2)).reshape(-1, 4)[:, [0, 1, 3]]
         return kpt[:, :5]
@@ -160,7 +163,7 @@ def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_sc
         D, V = torch.linalg.eigh(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2))
         center = kpt[:, :2]
         axes = (cf / D)**0.5
-        rotation = torch.acos(V[:, 0, 0]) * 180 / np.pi
+        rotation = torch.atan2(V[:, 1, 0], V[:, 0, 0]) * 180 / np.pi
         return {'center': center, 'axes': axes, 'rotation': rotation}
 
 def plot_hz_eli(image, kpts, save_to='harrisz_pytorch_eli.pdf', dpi=150, c_color='b', c_marker='.', markersize=1, e_color='b', linewidth=0.5):
@@ -188,7 +191,10 @@ if __name__ == '__main__':
 
     # standalone usage
     img = load_to_tensor(image, grayscale=True).to(torch.float)
+    start = time.time()
     kpts = hz(img, output_format='eli')    
+    end = time.time()
+    print("Elapsed = %s (HarrisZ)" % (end - start))
     # show keypoints 
     plot_hz_eli(image, kpts, save_to='harrisz_pytorch_eli.pdf')
     
@@ -201,8 +207,8 @@ if __name__ == '__main__':
 
         # show keypoints with Kornia
         img = cv2.cvtColor(cv2.imread(image), cv2.COLOR_BGR2RGB)    
-        visualize_LAF(K.image_to_tensor(img, False), lafs, 0, return_fig_ax=True)
+        visualize_LAF(K.image_to_tensor(img, False), lafs, 0)
         plt.axis('off')    
 
         # save the plot        
-        plt.savefig('harrisz_pytorch_laf.pdf', dpi = 150, bbox_inches='tight')
+        plt.savefig('harrisz_pytorch_laf.pdf', dpi=150, bbox_inches='tight')
