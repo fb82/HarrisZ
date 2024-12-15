@@ -19,7 +19,6 @@ try:
     import kornia.feature as KF
     from kornia_moons.viz import visualize_LAF
     import cv2
-    import matplotlib.pyplot as plt
     kornia_on = True
 except:
     kornia_on = False
@@ -55,7 +54,7 @@ def zscore(im):
         
     return z
 
-def max_mask(img, rd, dm_mask, rad_max=3):
+def max_mask(img, rd, dm_mask, rad_max=3, block_mem=16*10**6):
     rad = min(rad_max, max(1, round(rd / np.sqrt(2))));
     k = 2 * rad + 1
 
@@ -72,14 +71,32 @@ def max_mask(img, rd, dm_mask, rad_max=3):
     sidx = torch.argsort(max_val, descending=True)
     rc = rc[sidx, 1:]    
 
-    m = torch.cdist(rc.type(torch.float), rc.type(torch.float))
     m_idx = torch.full((rc.shape[0],), -1, device=device, dtype=torch.int)
     m_idx[0] = 0
     m_n = 1
-    for i in range(1,m_idx.shape[0]):
-        if (m[i, m_idx[:m_n]] >= rd).all():
-            m_n = m_n + 1
-            m_idx[i] = i
+
+#   # base
+#   m = torch.cdist(rc.type(torch.float), rc.type(torch.float))
+#   for i in range(1,m_idx.shape[0]):
+#       if (m[i, m_idx[:m_n]] >= rd).all():
+#           m_n = m_n + 1
+#           m_idx[i] = i
+
+    # memory-optimized
+    # note that when m_n_ == m_n -->
+    # (m[i - ii, m_idx[m_n_:m_n]] >= rd).all() = ([]).all() = True
+    ii = 1
+    while ii < m_idx.shape[0]:
+        block_len = np.ceil((np.sqrt(ii**2 + 4 * block_mem) - ii) * 0.5)
+        ij = int(min(m_idx.shape[0], ii + block_len))
+        m = torch.cdist(rc[ii:ij].type(torch.float), rc.type(torch.float))
+        to_check = (m[:, m_idx[:m_n]] >= rd).all(dim=1)
+        m_n_ = m_n
+        for i in range(ii, ij):
+            if (to_check[i - ii]) and (m[i - ii, m_idx[m_n_:m_n]] >= rd).all():
+                m_n = m_n + 1
+                m_idx[i] = i
+        ii = ij
 
     return rc[m_idx[:m_n]]
         
