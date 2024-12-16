@@ -24,9 +24,28 @@ except:
     kornia_on = False
     import warnings
     warnings.warn("Kornia e Kornia-Moons not found: skipping the related demo part")    
-    
-    
+        
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+def plot_hz_eli(image, kpts, save_to='harrisz_pytorch_eli.pdf', dpi=150, c_color='b', c_marker='.', markersize=1, e_color='b', linewidth=0.5):
+    plt.figure()
+    plt.axis('off')
+    plt.imshow(Image.open(image))
+
+    pts = kpts['center'].to('cpu').numpy()
+    eli_axes =kpts['axes'].to('cpu').numpy()
+    eli_rot = kpts['rotation'].to('cpu').numpy()
+    
+    ax = plt.gca()
+    plt.plot(pts[:, 0], pts[:, 1], linestyle='', color=c_color, marker=c_marker, markersize=markersize)
+    for i in range(pts.shape[0]):
+        eli = Ellipse(xy=(pts[i, 0], pts[i, 1]), width=eli_axes[i, 0], height=eli_axes[i, 1], angle=eli_rot[i], facecolor='none', edgecolor=e_color, linewidth=linewidth)
+        ax.add_patch(eli)
+
+    if not(save_to is None):
+        plt.savefig(save_to, dpi=dpi, bbox_inches='tight')
+
 
 def load_to_tensor(image_path, grayscale=False):
     image = Image.open(image_path)
@@ -132,7 +151,7 @@ def get_eli(dx2, dy2, dxy, scale):
     return kp_eli, kp_ratio
 
 
-def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_scales=9, start_scale=3, dm_th=0.31, cf=3, output_format='vgg'):
+def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_scales=9, start_scale=3, dm_th=0.31, cf=3, xy_offset=0.0, output_format='vgg'):
     kpt = torch.zeros((0,9), device=device)
     i_scale = scale_base ** np.arange(0, n_scales)
     d_scale = i_scale * scale_ratio
@@ -176,6 +195,7 @@ def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_sc
  
         kpt = torch.cat((kpt, kpt_[kp_good]))
 
+    kpt[:, :2] = kpt[:, :2] + xy_offset
     if output_format == 'vgg':
         kpt[:, 2:5] = torch.linalg.inv(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2)).reshape(-1, 4)[:, [0, 1, 3]]
         return kpt[:, :5]
@@ -189,25 +209,27 @@ def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_sc
         rotation = torch.atan2(V[:, 1, 0], V[:, 0, 0]) * 180 / np.pi
         return {'center': center, 'axes': axes, 'rotation': rotation}
 
-def plot_hz_eli(image, kpts, save_to='harrisz_pytorch_eli.pdf', dpi=150, c_color='b', c_marker='.', markersize=1, e_color='b', linewidth=0.5):
-    plt.figure()
-    plt.axis('off')
-    plt.imshow(Image.open(image))
 
-    pts = kpts['center'].to('cpu').numpy()
-    eli_axes =kpts['axes'].to('cpu').numpy()
-    eli_rot = kpts['rotation'].to('cpu').numpy()
+def hz_plus(img, max_kpts=8000, fast_save_memory=False, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75,
+       n_scales=4, start_scale=0, dm_th=0.31, cf=3, xy_offset=0.0, output_format='vgg',
+       start_scale_at_2x=2, rescale_method=Image.Resampling.LANCZOS, min_scale=np.sqrt(2), sieve_rad=1, laf_offset=10, max_kpts_cf=2):
     
-    ax = plt.gca()
-    plt.plot(pts[:, 0], pts[:, 1], linestyle='', color=c_color, marker=c_marker, markersize=markersize)
-    for i in range(pts.shape[0]):
-        eli = Ellipse(xy=(pts[i, 0], pts[i, 1]), width=eli_axes[i, 0], height=eli_axes[i, 1], angle=eli_rot[i], facecolor='none', edgecolor=e_color, linewidth=linewidth)
-        ax.add_patch(eli)
-
-    if not(save_to is None):
-        plt.savefig(save_to, dpi=dpi, bbox_inches='tight')
+    sz = img.shape
+    if sz[0] == 3: color_grad=True
+    else: color_grad=False
     
+    if start_scale < start_scale_at_2x:
+        im_2x = transforms.PILToTensor()(transforms.ToPILImage()(img).resize((sz[2] * 2, sz[1] * 2), resample=rescale_method)).to(torch.float)
 
+    kpt = torch.zeros((0,9), device=device)
+    if color_grad:        
+        img1 = transforms.functional.rgb_to_grayscale(img)
+        img2 = torch.max(img, dim=0)[0][None]
+        dx1, dy1 = derivative(img1);
+        dx2, dy2 = derivative(img2);
+
+    return
+    
 if __name__ == '__main__':
     # example image
     image = 'images/graf5.png'
@@ -215,7 +237,20 @@ if __name__ == '__main__':
     # a diffent image can be passed to the demo script
     if len(sys.argv) > 1:
         image = sys.argv[1]
-                
+
+    ### HarrisZ+
+
+    # standalone usage
+    img = load_to_tensor(image).to(torch.float)
+    start = time.time()
+    kpts = hz_plus(img, output_format='eli')    
+    end = time.time()
+    print("Elapsed = %s (HarrisZ)" % (end - start))
+    # show keypoints 
+    plot_hz_eli(image, kpts, save_to='harrisz_pytorch_eli.pdf')
+
+    ### HarrisZ
+
     # standalone usage
     img = load_to_tensor(image, grayscale=True).to(torch.float)
     start = time.time()
