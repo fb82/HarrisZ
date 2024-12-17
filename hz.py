@@ -2,7 +2,7 @@
 import torch
 import numpy as np
 from PIL import Image
-import torchvision.transforms as transforms
+import torchvision.transforms as tt
 from torchvision.transforms import v2
 
 # for demo
@@ -40,7 +40,8 @@ def plot_hz_eli(image, kpts, save_to='harrisz_pytorch_eli.pdf', dpi=150, c_color
     ax = plt.gca()
     plt.plot(pts[:, 0], pts[:, 1], linestyle='', color=c_color, marker=c_marker, markersize=markersize)
     for i in range(pts.shape[0]):
-        eli = Ellipse(xy=(pts[i, 0], pts[i, 1]), width=eli_axes[i, 0], height=eli_axes[i, 1], angle=eli_rot[i], facecolor='none', edgecolor=e_color, linewidth=linewidth)
+        eli = Ellipse(xy=(pts[i, 0], pts[i, 1]), width=eli_axes[i, 0], height=eli_axes[i, 1], angle=eli_rot[i],
+                      facecolor='none', edgecolor=e_color, linewidth=linewidth)
         ax.add_patch(eli)
 
     if not(save_to is None):
@@ -50,17 +51,17 @@ def plot_hz_eli(image, kpts, save_to='harrisz_pytorch_eli.pdf', dpi=150, c_color
 def load_to_tensor(image_path, grayscale=False):
     image = Image.open(image_path)
 
-    what = [transforms.PILToTensor()]
-    if grayscale: what.append(transforms.Grayscale())    
-    transform = transforms.Compose(what)
+    what = [tt.PILToTensor()]
+    if grayscale: what.append(tt.Grayscale())    
+    transform = tt.Compose(what)
 
     return transform(image).to(device)
 
 def derivative(img):
-    dx = torch.nn.functional.pad(img[:, 1:img.shape[1]-1, :img.shape[2]-2] - img[:, 1:img.shape[1]-1, 2:img.shape[2]],(1,1,1,1,0,0), mode='constant', value=0) 
-    dy = torch.nn.functional.pad(img[:, :img.shape[1]-2, 1:img.shape[2]-1] - img[:, 2:img.shape[1], 1:img.shape[2]-1],(1,1,1,1,0,0), mode='constant', value=0) 
-
-    return dx, dy
+    dx_dy = torch.cat((img[:, 1:img.shape[1]-1, :img.shape[2]-2] - img[:, 1:img.shape[1]-1, 2:img.shape[2]],
+                 img[:, :img.shape[1]-2, 1:img.shape[2]-1] - img[:, 2:img.shape[1], 1:img.shape[2]-1]), dim=0)
+    dx_dy = torch.nn.functional.pad(dx_dy,(1,1,1,1,0,0), mode='constant', value=0) 
+    return dx_dy
 
 
 def zscore(im):
@@ -73,12 +74,19 @@ def zscore(im):
         
     return z
 
-def max_mask(img, rd, dm_mask, rad_max=3, block_mem=16*10**6):
+def max_mask(img, rd, dm_mask, rad_max=3, block_mem=16*10**6, prev_filter={'k': 0}):
     rad = min(rad_max, max(1, round(rd / np.sqrt(2))));
     k = 2 * rad + 1
 
-    max_img = torch.nn.MaxPool2d(k, stride=1, padding=rad)(img) == img
-    unique_max_img = ((torch.nn.AvgPool2d(k, stride=1, padding=rad)(max_img.type(torch.float)) * k**2) == 1) & max_img
+    if prev_filter['k'] == k:
+        max_filter = prev_filter['max_filter']
+        avg_filter = prev_filter['avg_filter']
+    else:    
+        max_filter = torch.nn.MaxPool2d(k, stride=1, padding=rad)
+        avg_filter = torch.nn.AvgPool2d(k, stride=1, padding=rad)
+    
+    max_img = max_filter(img) == img
+    unique_max_img = ((avg_filter(max_img.type(torch.float)) * k**2) == 1) & max_img
     ismax = unique_max_img & (img > 0) & dm_mask
 
     rc = torch.argwhere(ismax)
@@ -99,7 +107,7 @@ def max_mask(img, rd, dm_mask, rad_max=3, block_mem=16*10**6):
 #   for i in range(1,m_idx.shape[0]):
 #       if (m[i, m_idx[:m_n]] >= rd).all():
 #           m_n = m_n + 1
-#           m_idx[i] = i
+#           m_idx[m_n] = i
 
     # memory-optimized
     # note that when m_n_ == m_n -->
@@ -113,11 +121,11 @@ def max_mask(img, rd, dm_mask, rad_max=3, block_mem=16*10**6):
         m_n_ = m_n
         for i in range(ii, ij):
             if (to_check[i - ii]) and (m[i - ii, m_idx[m_n_:m_n]] >= rd).all():
+                m_idx[m_n] = i
                 m_n = m_n + 1
-                m_idx[i] = i
         ii = ij
 
-    return rc[m_idx[:m_n]]
+    return rc[m_idx[:m_n]], {'k': k, 'max_filter': max_filter, 'avg_filter': avg_filter}
         
 
 def sub_pix(img, kp):
@@ -151,35 +159,36 @@ def get_eli(dx2, dy2, dxy, scale):
     return kp_eli, kp_ratio
 
 
-def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_scales=9, start_scale=3, dm_th=0.31, cf=3, xy_offset=0.0, output_format='vgg'):
-    kpt = torch.zeros((0,9), device=device)
+def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_scales=9,
+       start_scale=3, dm_th=0.31, cf=3, xy_offset=0.0, output_format='vgg'):
+    kpt = torch.zeros((0, 9), device=device)
     i_scale = scale_base ** np.arange(0, n_scales)
     d_scale = i_scale * scale_ratio
-    dx, dy = derivative(img)
+    dx_dy = derivative(img)
 
+    prev_filter={'k': 0}
     for i in range(start_scale, n_scales):        
         rd = int(max(1, np.ceil(3 * d_scale[i])))
         hd = 2 * rd + 1
         
-        dx_d = v2.GaussianBlur(kernel_size=hd, sigma=d_scale[i])(dx)
-        dy_d = v2.GaussianBlur(kernel_size=hd, sigma=d_scale[i])(dy)
+        smooth_d = v2.GaussianBlur(kernel_size=hd, sigma=d_scale[i])
+        dx_dy_d = smooth_d(dx_dy)
 
-        dm = (dx_d**2 + dy_d**2)**0.5;
-        dm_mask = v2.GaussianBlur(kernel_size=hd, sigma=d_scale[i])((dm > dm.mean()).to(torch.float))
+        dm = ((dx_dy_d**2).sum(dim=0, keepdim=True)**0.5)
+        dm_mask = smooth_d((dm > dm.mean()).to(torch.float))
 
-        dx_d = dx_d * dm_mask
-        dy_d = dy_d * dm_mask
+        dx_dy_d = dx_dy_d * dm_mask
         
         ri = int(max(1, np.ceil(3 * i_scale[i])))
         hi = 2 * ri + 1
 
-        dxy = v2.GaussianBlur(kernel_size=hi, sigma=i_scale[i])(dx_d * dy_d)
-        dx2 = v2.GaussianBlur(kernel_size=hi, sigma=i_scale[i])(dx_d**2)
-        dy2 = v2.GaussianBlur(kernel_size=hi, sigma=i_scale[i])(dy_d**2)
+        smooth_i = v2.GaussianBlur(kernel_size=hi, sigma=i_scale[i])
+        dxy = smooth_i(dx_dy_d.prod(dim=0, keepdim=True))
+        dx2_dy2 = smooth_i(dx_dy_d**2)
 
-        harris = zscore(dx2 * dy2 - dxy**2) - zscore((dx2 + dy2)**2)
+        harris = zscore(dx2_dy2.prod(dim=0, keepdim=True) - dxy**2) - zscore((dx2_dy2.sum(dim=0, keepdim=True))**2)
         
-        kp = max_mask(harris, rd, dm_mask > dm_th)
+        kp, prev_filter = max_mask(harris, rd, dm_mask > dm_th, prev_filter=prev_filter)
         
         if kp.shape[0] == 0:
             continue
@@ -188,7 +197,7 @@ def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_sc
         kp_s = torch.tensor([i, d_scale[i], i_scale[i]], device=device).repeat(kp.shape[0], 1)
         
         kp_index = kp[:, 0] * harris.shape[2] + kp[:, 1]
-        kp_eli, kp_ratio = get_eli(dx2.flatten()[kp_index],dy2.flatten()[kp_index],dxy.flatten()[kp_index], i_scale[i] * cf)
+        kp_eli, kp_ratio = get_eli(dx2_dy2[0].flatten()[kp_index], dx2_dy2[1].flatten()[kp_index], dxy.flatten()[kp_index], i_scale[i] * cf)
         
         kpt_ = torch.cat((kp_sub_pix[:,[1, 0]], kp_eli, kp_s, kp_ratio.unsqueeze(-1)), dim=1)
         kp_good = 1 - kp_ratio < scale_th
@@ -210,25 +219,194 @@ def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_sc
         return {'center': center, 'axes': axes, 'rotation': rotation}
 
 
+def best_derivative(dx_dy_1, dx_dy_2):
+    aux = aux =torch.cat((dx_dy_1, dx_dy_2), dim=1).reshape(2,2,dx_dy_1.shape[-2],dx_dy_1.shape[-1])
+    _, aux_abs = aux.abs().max(dim=1)
+    return aux.gather(dim=1, index=aux_abs[:, None]).squeeze(1)
+
+
+def select_max(rc, rd, block_mem=16*10**6):    
+    m_idx = torch.full((rc.shape[0],), -1, device=device, dtype=torch.int)
+    m_idx[0] = 0
+    m_n = 1
+
+#   # base
+#   m = torch.cdist(rc.type(torch.float), rc.type(torch.float))
+#   for i in range(1,m_idx.shape[0]):
+#       if (m[i, m_idx[:m_n]] >= rd).all():
+#           m_n = m_n + 1
+#           m_idx[i] = i
+
+    # memory-optimized
+    # note that when m_n_ == m_n -->
+    # (m[i - ii, m_idx[m_n_:m_n]] >= rd).all() = ([]).all() = True
+    ii = 1
+    while ii < m_idx.shape[0]:
+        block_len = np.ceil((np.sqrt(ii**2 + 4 * block_mem) - ii) * 0.5)
+        ij = int(min(m_idx.shape[0], ii + block_len))
+        m = torch.cdist(rc[ii:ij].type(torch.float), rc.type(torch.float))
+        to_check = (m[:, m_idx[:m_n]] >= rd).all(dim=1)
+        m_n_ = m_n
+        for i in range(ii, ij):
+            if (to_check[i - ii]) and (m[i - ii, m_idx[m_n_:m_n]] >= rd).all():
+                m_idx[m_n] = i
+                m_n = m_n + 1
+        ii = ij
+
+    return m_idx[:m_n]     
+
+
+def uniform_kpts(sz, kpt, max_kpts, max_kpts_cf):
+    c_kp = torch.zeros((0, 10), device=device)
+    r_kp = kpt
+    c_d = 2 * np.sqrt(sz[1] * sz[2] / (max_kpts * np.pi/ max_kpts_cf))
+    
+    while True:
+        if r_kp.shape[0] == 0:
+            break
+
+        idx = r_kp[:, 5].argsort(descending=False)
+        idx_ = r_kp[idx, 9].argsort(descending=False, stable=True)
+        idx = idx[idx_]
+        
+        r_kp = r_kp[idx]
+        max_index = select_max(r_kp[:, :2], c_d)
+        c_idx = torch.zeros(r_kp.shape[0], device=device, dtype=torch.bool)
+        c_idx[max_index] = True
+
+        c_kp = torch.cat((c_kp, r_kp[c_idx]))
+        r_kp = r_kp[~c_idx]
+    return c_kp        
+
+
 def hz_plus(img, max_kpts=8000, fast_save_memory=False, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75,
-       n_scales=4, start_scale=0, dm_th=0.31, cf=3, xy_offset=0.0, output_format='vgg',
+       n_scales=4, start_scale=0, dm_th=0.31, cf=3, xy_offset=0.0, output_format='vgg', color_grad=True,
        start_scale_at_2x=2, rescale_method=Image.Resampling.LANCZOS, min_scale=np.sqrt(2), sieve_rad=1, laf_offset=10, max_kpts_cf=2):
     
     sz = img.shape
-    if sz[0] == 3: color_grad=True
-    else: color_grad=False
+    if sz[0] != 3: color_grad=False
     
     if start_scale < start_scale_at_2x:
-        im_2x = transforms.PILToTensor()(transforms.ToPILImage()(img).resize((sz[2] * 2, sz[1] * 2), resample=rescale_method)).to(torch.float)
+        img_2x = tt.PILToTensor()(tt.ToPILImage()(img).resize((sz[2] * 2, sz[1] * 2), resample=rescale_method)).to(torch.float).to(device)
 
     kpt = torch.zeros((0,9), device=device)
     if color_grad:        
-        img1 = transforms.functional.rgb_to_grayscale(img)
-        img2 = torch.max(img, dim=0)[0][None]
-        dx1, dy1 = derivative(img1);
-        dx2, dy2 = derivative(img2);
+        img1 = tt.functional.rgb_to_grayscale(img)
+        img2 = torch.amax(img, dim=0, keepdim=True)
+        dx_dy_1 = derivative(img1);
+        dx_dy_2 = derivative(img2);
+        dx_dy_g = best_derivative(dx_dy_1, dx_dy_2)
+        dx_dy = dx_dy_1
+        
+        if start_scale < start_scale_at_2x:
+            img1_2x = tt.functional.rgb_to_grayscale(img_2x)
+            img2_2x = torch.amax(img_2x, dim=0, keepdim=True)
+            dx_dy_1_2x = derivative(img1_2x);
+            dx_dy_2_2x = derivative(img2_2x);
+            dx_dy_g_2x = best_derivative(dx_dy_1_2x, dx_dy_2_2x)
+            dx_dy_2x = dx_dy_1_2x
+    else:                
+        if sz[0] == 3:
+            img = tt.functional.rgb_to_grayscale(img)
+        dx_dy = derivative(img)     
+    
+        if start_scale < start_scale_at_2x:
+            if sz[0] == 3:
+                img_2x = tt.functional.rgb_to_grayscale(img_2x)
+            dx_dy_2x = derivative(img_2x);     
+        
+    i_scale = scale_base**np.arange(start_scale, n_scales+1)
+    d_scale = i_scale * scale_ratio;
+    is_2x_scale = np.arange(start_scale, n_scales+1) < start_scale_at_2x;       
+        
+    dx_dy_1x = dx_dy
+    if color_grad:
+        dx_dy_g_1x = dx_dy_g
+        
+    kpt = torch.zeros((0, 10), device=device)        
+    prev_filter={'k': 0} 
+    for i in range(len(i_scale)):
+        if not is_2x_scale[i]:
+            dx_dy = dx_dy_1x
+            if color_grad: dx_dy_g = dx_dy_g_1x
+        else:
+            dx_dy = dx_dy_2x
+            if color_grad: dx_dy_g = dx_dy_g_2x
 
-    return
+            d_scale[i] = d_scale[i] * 2;
+            i_scale[i] = i_scale[i] * 2;
+
+        rd = int(max(1, np.ceil(3 * d_scale[i])))
+        hd = 2 * rd + 1
+
+        smooth_d = v2.GaussianBlur(kernel_size=hd, sigma=d_scale[i])
+        dx_dy_d = smooth_d(dx_dy)
+        if not color_grad:
+            dm = ((dx_dy_d**2).sum(dim=0, keepdim=True)**0.5)
+            dm_mask = smooth_d((dm > dm.mean()).to(torch.float))
+        else:
+            dx_dy_g_d = smooth_d(dx_dy_g)
+            dm = ((dx_dy_g_d**2).sum(dim=0, keepdim=True)**0.5)
+            dm_mask = smooth_d((dm > dm.mean()).to(torch.float))
+
+        dx_dy_d = dx_dy_d * dm_mask
+        ri = int(max(1, np.ceil(3 * i_scale[i])))
+        hi = 2 * ri + 1
+
+        smooth_i = v2.GaussianBlur(kernel_size=hi, sigma=i_scale[i])
+        dxy = smooth_i(dx_dy_d.prod(dim=0, keepdim=True))
+        dx2_dy2 = smooth_i(dx_dy_d**2)
+
+        harris = zscore(dx2_dy2.prod(dim=0, keepdim=True) - dxy**2) - zscore((dx2_dy2.sum(dim=0, keepdim=True))**2)
+        kp, prev_filter = max_mask(harris, rd, dm_mask > dm_th, prev_filter=prev_filter)
+        
+        if kp.shape[0] == 0:
+            continue
+
+        if not is_2x_scale[i]:
+            double_adjust = 1
+        else:
+            double_adjust = 2
+        d_scale_ = max(min_scale * scale_ratio, d_scale[i] / double_adjust)
+        i_scale_ = max(min_scale, i_scale[i] / double_adjust)            
+        
+        kp_sub_pix = sub_pix(harris, kp)
+        kp_s = torch.tensor([i, d_scale_, i_scale_], device=device).repeat(kp.shape[0], 1)
+
+        kp_index = kp[:, 0] * harris.shape[2] + kp[:, 1]
+        kp_eli, kp_ratio = get_eli(dx2_dy2[0].flatten()[kp_index], dx2_dy2[1].flatten()[kp_index], dxy.flatten()[kp_index], i_scale_ * cf)
+        hv = harris.flatten()[kp_index]
+        
+        kpt_ = torch.cat((kp_sub_pix[:,[1, 0]] / double_adjust, kp_eli, kp_s, kp_ratio.unsqueeze(-1), hv.unsqueeze(-1)), dim=1)
+        kp_good = 1 - kp_ratio < scale_th 
+
+        kpt = torch.cat((kpt, kpt_[kp_good]))
+        
+    if min_scale:
+        kpt = kpt[torch.argsort(kpt[:, -1], descending=True)]
+        to_check = kpt[:, 6] == min_scale * scale_ratio
+        to_hold_idx = select_max(kpt[to_check, :2], sieve_rad)
+        to_remove = torch.full((to_check.sum(), ), 1, device=device, dtype=torch.bool)
+        to_remove[to_hold_idx] = False
+        to_check[to_check.clone()] = to_remove
+        kpt = kpt[~to_check]
+
+    kpt = uniform_kpts(sz, kpt, max_kpts, max_kpts_cf)
+
+    kpt[:, :2] = kpt[:, :2] + xy_offset
+    if output_format == 'vgg':
+        kpt[:, 2:5] = torch.linalg.inv(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2)).reshape(-1, 4)[:, [0, 1, 3]]
+        return kpt[:, :5]
+    elif output_format == 'laf':
+        kpt[:, 2:5] = kpt[:, 2:5] / cf
+        return kpt[:, :5]        
+    else:
+        D, V = torch.linalg.eigh(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2))
+        center = kpt[:, :2]
+        axes = (cf / D)**0.5
+        rotation = torch.atan2(V[:, 1, 0], V[:, 0, 0]) * 180 / np.pi
+        return {'center': center, 'axes': axes, 'rotation': rotation}
+
     
 if __name__ == '__main__':
     # example image
@@ -238,7 +416,7 @@ if __name__ == '__main__':
     if len(sys.argv) > 1:
         image = sys.argv[1]
 
-    ### HarrisZ+
+    # ### HarrisZ+
 
     # standalone usage
     img = load_to_tensor(image).to(torch.float)
@@ -256,7 +434,7 @@ if __name__ == '__main__':
     start = time.time()
     kpts = hz(img, output_format='eli')    
     end = time.time()
-    print("Elapsed = %s (HarrisZ)" % (end - start))
+    print("Elapsed = %s (HarrisZ+)" % (end - start))
     # show keypoints 
     plot_hz_eli(image, kpts, save_to='harrisz_pytorch_eli.pdf')
     
