@@ -1,0 +1,14 @@
+# pip install -r requirements.txt
+# tested on Ubuntu 24.04.1 LTS and Python 3.12
+#
+# to run the base script
+numpy
+pillow
+torch
+torchvision
+matplotlib
+#
+# with Kornia
+opencv-python
+kornia
+kornia-moons

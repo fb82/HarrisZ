@@ -28,6 +28,7 @@ except:
         
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+
 def plot_hz_eli(image, kpts, save_to='harrisz_pytorch_eli.pdf', dpi=150, c_color='b', c_marker='.', markersize=1, e_color='b', linewidth=0.5):
     plt.figure()
     plt.axis('off')
@@ -447,17 +448,18 @@ if __name__ == '__main__':
     iname, iext = os.path.splitext(image)        
     
     block_memory = 16*10**6 
-    max_pts = 8000 # np.inf
+    max_pts = 8000 # np.inf 
 
     print(f"Image: {image} (other images can be passed as 1st argument of the script)")
     print(f"Memory block dimension: {block_memory} floats (reduce in case of OOM)")
     print(f"Max number of keypoints to extract: {max_pts} (reduce for faster computation, especially with bigger images)")
     print("Note: 1. returned keypoints are sorted from the best to the worst")
-    print("      2. by default all keypoints are returned, setting the related parameter to Inf")
+    print("      2. by default all keypoints are returned, setting the related parameter to inf")
+    print("      3. HarrisZ input image is only grayscale, HarrisZ+ works usually better with RGB images")
     print("")
 
     ### HarrisZ
-    print("Running HarrisZ standalone (input image must be grayscale)")
+    print("Running HarrisZ standalone")
     # standalone usage
     img = load_to_tensor(image, grayscale=True).to(torch.float)
     start = time.time()
@@ -476,7 +478,7 @@ if __name__ == '__main__':
 
     # with Kornia
     if kornia_on:
-        print("Running HarrisZ and exporting to Kornia format (input image must be grayscale)")
+        print("Running HarrisZ and exporting to Kornia format")
         # run and convert to laf
         img = load_to_tensor(image, grayscale=True).to(torch.float)
         start = time.time()
@@ -500,7 +502,7 @@ if __name__ == '__main__':
         print("")
     
     ### HarrisZ+
-    print("Running HarrisZ+ standalone (input image can be RGB)")
+    print("Running HarrisZ+ standalone")
     # standalone usage
     img = load_to_tensor(image).to(torch.float)
     start = time.time()
@@ -519,7 +521,7 @@ if __name__ == '__main__':
 
     # with Kornia
     if kornia_on:
-        print("Running HarrisZ+ and exporting to Kornia format (input image can be RGB)")
+        print("Running HarrisZ+ and exporting to Kornia format")
         # run and convert to laf
         img = load_to_tensor(image).to(torch.float)
         start = time.time()
