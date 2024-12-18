@@ -7,6 +7,7 @@ from torchvision.transforms import v2
 
 # for demo
 import sys
+import os
 
 # for visualization
 import time
@@ -26,7 +27,6 @@ except:
     warnings.warn("Kornia e Kornia-Moons not found: skipping the related demo part")    
         
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 
 def plot_hz_eli(image, kpts, save_to='harrisz_pytorch_eli.pdf', dpi=150, c_color='b', c_marker='.', markersize=1, e_color='b', linewidth=0.5):
     plt.figure()
@@ -74,7 +74,7 @@ def zscore(im):
         
     return z
 
-def max_mask(img, rd, dm_mask, rad_max=3, block_mem=16*10**6, prev_filter={'k': 0}):
+def max_mask(img, rd, dm_mask, rad_max=3, block_mem=16*10**6, prev_filter={'k': 0}, max_max_pts=np.inf):
     rad = min(rad_max, max(1, round(rd / np.sqrt(2))));
     k = 2 * rad + 1
 
@@ -98,34 +98,8 @@ def max_mask(img, rd, dm_mask, rad_max=3, block_mem=16*10**6, prev_filter={'k': 
     sidx = torch.argsort(max_val, descending=True)
     rc = rc[sidx, 1:]    
 
-    m_idx = torch.full((rc.shape[0],), -1, device=device, dtype=torch.int)
-    m_idx[0] = 0
-    m_n = 1
-
-#   # base
-#   m = torch.cdist(rc.type(torch.float), rc.type(torch.float))
-#   for i in range(1,m_idx.shape[0]):
-#       if (m[i, m_idx[:m_n]] >= rd).all():
-#           m_n = m_n + 1
-#           m_idx[m_n] = i
-
-    # memory-optimized
-    # note that when m_n_ == m_n -->
-    # (m[i - ii, m_idx[m_n_:m_n]] >= rd).all() = ([]).all() = True
-    ii = 1
-    while ii < m_idx.shape[0]:
-        block_len = np.ceil((np.sqrt(ii**2 + 4 * block_mem) - ii) * 0.5)
-        ij = int(min(m_idx.shape[0], ii + block_len))
-        m = torch.cdist(rc[ii:ij].type(torch.float), rc.type(torch.float))
-        to_check = (m[:, m_idx[:m_n]] >= rd).all(dim=1)
-        m_n_ = m_n
-        for i in range(ii, ij):
-            if (to_check[i - ii]) and (m[i - ii, m_idx[m_n_:m_n]] >= rd).all():
-                m_idx[m_n] = i
-                m_n = m_n + 1
-        ii = ij
-
-    return rc[m_idx[:m_n]], {'k': k, 'max_filter': max_filter, 'avg_filter': avg_filter}
+    rc_idx = select_max(rc, rd, block_mem=block_mem, max_max_pts=max_max_pts)
+    return rc[rc_idx], {'k': k, 'max_filter': max_filter, 'avg_filter': avg_filter}
         
 
 def sub_pix(img, kp):
@@ -159,8 +133,115 @@ def get_eli(dx2, dy2, dxy, scale):
     return kp_eli, kp_ratio
 
 
-def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_scales=9,
-       start_scale=3, dm_th=0.31, cf=3, xy_offset=0.0, output_format='vgg'):
+def best_derivative(dx_dy_1, dx_dy_2):
+    aux = aux =torch.cat((dx_dy_1, dx_dy_2), dim=1).reshape(2,2,dx_dy_1.shape[-2],dx_dy_1.shape[-1])
+    _, aux_abs = aux.abs().max(dim=1)
+    return aux.gather(dim=1, index=aux_abs[:, None]).squeeze(1)
+
+
+# base version v0 - subject to OOM
+def select_max_v0(rc, rd, block_mem=16*10**6, max_max_pts=np.inf):    
+    m_idx = torch.zeros(rc.shape[0], device=device, dtype=torch.int)
+    m_idx[0] = 0
+    m_n = 1
+
+    m = torch.cdist(rc.type(torch.float), rc.type(torch.float))
+    for i in range(1,m_idx.shape[0]):
+        if (m[i, m_idx[:m_n]] >= rd).all():
+            m_n = m_n + 1
+            m_idx[i] = i
+            if m_n > max_max_pts: break
+
+    return m_idx[:m_n]     
+
+
+# memory-optimized v1 - no OOM issues
+# note that when m_n_ == m_n -->
+# (m[i - ii, m_idx[m_n_:m_n]] >= rd).all() = ([]).all() = True
+def select_max_v1(rc, rd, block_mem=16*10**6, max_max_pts=np.inf):    
+    m_idx = torch.zeros(rc.shape[0], device=device, dtype=torch.int)
+    m_idx[0] = 0
+    m_n = 1
+
+    ii = 1
+    while ii < m_idx.shape[0]:
+        block_len = np.ceil((np.sqrt(ii**2 + 4 * block_mem) - ii) * 0.5)
+        ij = int(min(m_idx.shape[0], ii + block_len))
+        m = torch.cdist(rc[ii:ij].type(torch.float), rc.type(torch.float))
+        to_check = (m[:, m_idx[:m_n]] >= rd).all(dim=1)
+        m_n_ = m_n
+        for i in range(ii, ij):
+            if (to_check[i - ii]) and (m[i - ii, m_idx[m_n_:m_n]] >= rd).all():
+                m_idx[m_n] = i
+                m_n = m_n + 1
+                if m_n > max_max_pts: break
+                
+        ii = ij
+
+    return m_idx[:m_n]     
+
+
+# memory-optimized v2 - no OOM, actually worse than v1
+# note that when m_n_ == m_n -->
+# (m[i - ii, m_idx[m_n_:m_n] - ii] >= rd).all() = (m[i - ii, [] - ii] >= rd).all() = ([]).all() = True    
+def select_max_v2(rc, rd, block_mem=16*10**6, max_max_pts=np.inf):    
+    m_idx = torch.zeros(rc.shape[0], device=device, dtype=torch.int)
+    m_idx[0] = 0
+    m_n = 1
+
+    block_len = int(np.ceil(np.sqrt(block_mem)))
+    ii = 1
+    for ii in np.arange(1, m_idx.shape[0], block_len):
+        check_bad = torch.zeros(min(m_idx.shape[0], ii + block_len) - ii, device=device, dtype=torch.bool)        
+        
+        ij = int(min(m_idx.shape[0], ii + block_len))
+        for i in np.arange(0, ii, block_len):
+            j = int(min(ii, i + block_len))
+            m = torch.cdist(rc[ii:ij].type(torch.float), rc[i:j].type(torch.float))
+            check_bad = check_bad | (m < rd).all(dim=1)
+       
+        m = torch.cdist(rc[ii:ij].type(torch.float), rc[ii:ij].type(torch.float))
+        m_n_ = m_n
+        for i in np.arange(ii, ij):
+            if (not (check_bad[i - ii])) and (m[i - ii, m_idx[m_n_:m_n] - ii] >= rd).all():
+                m_idx[m_n] = i
+                m_n = m_n + 1
+                if m_n > max_max_pts: break
+
+    return m_idx[:m_n]     
+
+select_max = select_max_v1
+
+def uniform_kpts(sz, kpt, max_kpts, max_kpts_cf, max_max_pts=np.inf, block_mem=16*10**6):
+    c_kp = torch.zeros((0, 10), device=device)
+    r_kp = kpt
+    c_d = 2 * np.sqrt(sz[1] * sz[2] / (max_kpts * np.pi/ max_kpts_cf))
+    
+    while True:
+        if r_kp.shape[0] == 0:
+            break
+
+        idx = r_kp[:, 5].argsort(descending=False)
+        idx_ = r_kp[idx, 9].argsort(descending=False, stable=True)
+        idx = idx[idx_]
+        
+        r_kp = r_kp[idx]
+        max_index = select_max(r_kp[:, :2], c_d, block_mem=block_mem, max_max_pts=max_max_pts)
+        c_idx = torch.zeros(r_kp.shape[0], device=device, dtype=torch.bool)
+        c_idx[max_index] = True
+
+        c_kp = torch.cat((c_kp, r_kp[c_idx]))
+        r_kp = r_kp[~c_idx]
+        
+        if c_kp.shape[0] > max_max_pts:
+            c_kp = c_kp[:max_max_pts]
+            break
+
+    return c_kp        
+
+
+def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_scales=9, start_scale=3,
+       dm_th=0.31, cf=3, xy_offset=0.0, max_max_pts=np.inf, block_mem=16*10**6, output_format='vgg'):
     kpt = torch.zeros((0, 9), device=device)
     i_scale = scale_base ** np.arange(0, n_scales)
     d_scale = i_scale * scale_ratio
@@ -188,7 +269,7 @@ def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_sc
 
         harris = zscore(dx2_dy2.prod(dim=0, keepdim=True) - dxy**2) - zscore((dx2_dy2.sum(dim=0, keepdim=True))**2)
         
-        kp, prev_filter = max_mask(harris, rd, dm_mask > dm_th, prev_filter=prev_filter)
+        kp, prev_filter = max_mask(harris, rd, dm_mask > dm_th, prev_filter=prev_filter, max_max_pts=max_max_pts, block_mem=block_mem)
         
         if kp.shape[0] == 0:
             continue
@@ -203,6 +284,11 @@ def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_sc
         kp_good = 1 - kp_ratio < scale_th
  
         kpt = torch.cat((kpt, kpt_[kp_good]))
+
+    idx = kpt[:, 5].argsort(descending=False, stable=True)
+    kpt = kpt[idx]
+    if kpt.shape[0] > max_max_pts:    
+        kpt = kpt[:max_max_pts]
 
     kpt[:, :2] = kpt[:, :2] + xy_offset
     if output_format == 'vgg':
@@ -219,68 +305,8 @@ def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_sc
         return {'center': center, 'axes': axes, 'rotation': rotation}
 
 
-def best_derivative(dx_dy_1, dx_dy_2):
-    aux = aux =torch.cat((dx_dy_1, dx_dy_2), dim=1).reshape(2,2,dx_dy_1.shape[-2],dx_dy_1.shape[-1])
-    _, aux_abs = aux.abs().max(dim=1)
-    return aux.gather(dim=1, index=aux_abs[:, None]).squeeze(1)
-
-
-def select_max(rc, rd, block_mem=16*10**6):    
-    m_idx = torch.full((rc.shape[0],), -1, device=device, dtype=torch.int)
-    m_idx[0] = 0
-    m_n = 1
-
-#   # base
-#   m = torch.cdist(rc.type(torch.float), rc.type(torch.float))
-#   for i in range(1,m_idx.shape[0]):
-#       if (m[i, m_idx[:m_n]] >= rd).all():
-#           m_n = m_n + 1
-#           m_idx[i] = i
-
-    # memory-optimized
-    # note that when m_n_ == m_n -->
-    # (m[i - ii, m_idx[m_n_:m_n]] >= rd).all() = ([]).all() = True
-    ii = 1
-    while ii < m_idx.shape[0]:
-        block_len = np.ceil((np.sqrt(ii**2 + 4 * block_mem) - ii) * 0.5)
-        ij = int(min(m_idx.shape[0], ii + block_len))
-        m = torch.cdist(rc[ii:ij].type(torch.float), rc.type(torch.float))
-        to_check = (m[:, m_idx[:m_n]] >= rd).all(dim=1)
-        m_n_ = m_n
-        for i in range(ii, ij):
-            if (to_check[i - ii]) and (m[i - ii, m_idx[m_n_:m_n]] >= rd).all():
-                m_idx[m_n] = i
-                m_n = m_n + 1
-        ii = ij
-
-    return m_idx[:m_n]     
-
-
-def uniform_kpts(sz, kpt, max_kpts, max_kpts_cf):
-    c_kp = torch.zeros((0, 10), device=device)
-    r_kp = kpt
-    c_d = 2 * np.sqrt(sz[1] * sz[2] / (max_kpts * np.pi/ max_kpts_cf))
-    
-    while True:
-        if r_kp.shape[0] == 0:
-            break
-
-        idx = r_kp[:, 5].argsort(descending=False)
-        idx_ = r_kp[idx, 9].argsort(descending=False, stable=True)
-        idx = idx[idx_]
-        
-        r_kp = r_kp[idx]
-        max_index = select_max(r_kp[:, :2], c_d)
-        c_idx = torch.zeros(r_kp.shape[0], device=device, dtype=torch.bool)
-        c_idx[max_index] = True
-
-        c_kp = torch.cat((c_kp, r_kp[c_idx]))
-        r_kp = r_kp[~c_idx]
-    return c_kp        
-
-
 def hz_plus(img, max_kpts=8000, fast_save_memory=False, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75,
-       n_scales=4, start_scale=0, dm_th=0.31, cf=3, xy_offset=0.0, output_format='vgg', color_grad=True,
+       n_scales=4, start_scale=0, dm_th=0.31, cf=3, xy_offset=0.0, output_format='vgg', max_max_pts=np.inf, block_mem=16*10**6, color_grad=True,
        start_scale_at_2x=2, rescale_method=Image.Resampling.LANCZOS, min_scale=np.sqrt(2), sieve_rad=1, laf_offset=10, max_kpts_cf=2):
     
     sz = img.shape
@@ -358,7 +384,7 @@ def hz_plus(img, max_kpts=8000, fast_save_memory=False, scale_base=np.sqrt(2), s
         dx2_dy2 = smooth_i(dx_dy_d**2)
 
         harris = zscore(dx2_dy2.prod(dim=0, keepdim=True) - dxy**2) - zscore((dx2_dy2.sum(dim=0, keepdim=True))**2)
-        kp, prev_filter = max_mask(harris, rd, dm_mask > dm_th, prev_filter=prev_filter)
+        kp, prev_filter = max_mask(harris, rd, dm_mask > dm_th, prev_filter=prev_filter, max_max_pts=max_max_pts, block_mem=block_mem)
         
         if kp.shape[0] == 0:
             continue
@@ -385,13 +411,13 @@ def hz_plus(img, max_kpts=8000, fast_save_memory=False, scale_base=np.sqrt(2), s
     if min_scale:
         kpt = kpt[torch.argsort(kpt[:, -1], descending=True)]
         to_check = kpt[:, 6] == min_scale * scale_ratio
-        to_hold_idx = select_max(kpt[to_check, :2], sieve_rad)
+        to_hold_idx = select_max(kpt[to_check, :2], sieve_rad, block_mem=block_mem, max_max_pts=max_max_pts)
         to_remove = torch.full((to_check.sum(), ), 1, device=device, dtype=torch.bool)
         to_remove[to_hold_idx] = False
         to_check[to_check.clone()] = to_remove
         kpt = kpt[~to_check]
 
-    kpt = uniform_kpts(sz, kpt, max_kpts, max_kpts_cf)
+    kpt = uniform_kpts(sz, kpt, max_kpts, max_kpts_cf, max_max_pts=max_max_pts, block_mem=block_mem)
 
     kpt[:, :2] = kpt[:, :2] + xy_offset
     if output_format == 'vgg':
@@ -411,44 +437,107 @@ def hz_plus(img, max_kpts=8000, fast_save_memory=False, scale_base=np.sqrt(2), s
 if __name__ == '__main__':
     # example image
     image = 'images/graf5.png'
+#   image = 'images/s_peter.png'
+#   image = 'images/wooden_lady.jpg'
 
     # a diffent image can be passed to the demo script
     if len(sys.argv) > 1:
         image = sys.argv[1]
+        
+    iname, iext = os.path.splitext(image)        
+    
+    block_memory = 16*10**6 
+    max_pts = 8000 # np.inf
 
-    # ### HarrisZ+
-
-    # standalone usage
-    img = load_to_tensor(image).to(torch.float)
-    start = time.time()
-    kpts = hz_plus(img, output_format='eli')    
-    end = time.time()
-    print("Elapsed = %s (HarrisZ)" % (end - start))
-    # show keypoints 
-    plot_hz_eli(image, kpts, save_to='harrisz_pytorch_eli.pdf')
+    print(f"Image: {image} (other images can be passed as 1st argument of the script)")
+    print(f"Memory block dimension: {block_memory} floats (reduce in case of OOM)")
+    print(f"Max number of keypoints to extract: {max_pts} (reduce for faster computation, especially with bigger images)")
+    print("Note: 1. returned keypoints are sorted from the best to the worst")
+    print("      2. by default all keypoints are returned, setting the related parameter to Inf")
+    print("")
 
     ### HarrisZ
-
+    print("Running HarrisZ standalone (input image must be grayscale)")
     # standalone usage
     img = load_to_tensor(image, grayscale=True).to(torch.float)
     start = time.time()
-    kpts = hz(img, output_format='eli')    
+    kpts = hz(img, output_format='eli', block_mem=block_memory, max_max_pts=max_pts)    
     end = time.time()
-    print("Elapsed = %s (HarrisZ+)" % (end - start))
+    print(f"Extracted keypoints: {kpts['center'].shape[0]}")
+    print("Elapsed time: %s (HarrisZ)" % (end - start))
     # show keypoints 
-    plot_hz_eli(image, kpts, save_to='harrisz_pytorch_eli.pdf')
-    
+    to_save = iname + '_harrisz.pdf'    
+    print(f"Plot keypoint ellipses and save the result in {to_save}")
+    start = time.time()
+    plot_hz_eli(image, kpts, save_to=to_save)
+    end = time.time()
+    print("Elapsed time: %s (plot)" % (end - start))
+    print("")
+
     # with Kornia
     if kornia_on:
+        print("Running HarrisZ and exporting to Kornia format (input image must be grayscale)")
         # run and convert to laf
         img = load_to_tensor(image, grayscale=True).to(torch.float)
-        kpts = hz(img, output_format='laf')
+        start = time.time()
+        kpts = hz(img, output_format='laf', block_mem=block_memory, max_max_pts=max_pts)
         lafs = KF.ellipse_to_laf(kpts[None]) 
-
+        end = time.time()
+        print(f"Extracted keypoints: {kpts.shape[0]}")
+        print("Elapsed time: %s (HarrisZ)" % (end - start))
+        # show keypoints 
+        to_save = iname + '_harrisz_kornia.pdf'    
+        print(f"Plot keypoint ellipses in Kornia and save the result in {to_save}")
+        start = time.time()
         # show keypoints with Kornia
         img = cv2.cvtColor(cv2.imread(image), cv2.COLOR_BGR2RGB)    
         visualize_LAF(K.image_to_tensor(img, False), lafs, 0)
         plt.axis('off')    
-
         # save the plot        
-        plt.savefig('harrisz_pytorch_laf.pdf', dpi=150, bbox_inches='tight')
+        plt.savefig(to_save, dpi=150, bbox_inches='tight')
+        end = time.time()
+        print("Elapsed time: %s (plot)" % (end - start))
+        print("")
+    
+    ### HarrisZ+
+    print("Running HarrisZ+ standalone (input image can be RGB)")
+    # standalone usage
+    img = load_to_tensor(image).to(torch.float)
+    start = time.time()
+    kpts = hz_plus(img, output_format='eli', block_mem=block_memory, max_max_pts=max_pts)    
+    end = time.time()
+    print(f"Extracted keypoints: {kpts['center'].shape[0]}")
+    print("Elapsed time: %s (HarrisZ+)" % (end - start))
+    # show keypoints 
+    to_save = iname + '_harrisz_plus.pdf'    
+    print(f"Plot keypoint ellipses and save the result in {to_save}")
+    start = time.time()
+    plot_hz_eli(image, kpts, save_to=to_save)
+    end = time.time()
+    print("Elapsed time: %s (plot)" % (end - start))
+    print("")
+
+    # with Kornia
+    if kornia_on:
+        print("Running HarrisZ+ and exporting to Kornia format (input image can be RGB)")
+        # run and convert to laf
+        img = load_to_tensor(image).to(torch.float)
+        start = time.time()
+        kpts = hz_plus(img, output_format='laf', block_mem=block_memory, max_max_pts=max_pts)
+        lafs = KF.ellipse_to_laf(kpts[None]) 
+        end = time.time()
+        print(f"Extracted keypoints: {kpts.shape[0]}")
+        print("Elapsed time: %s (HarrisZ+)" % (end - start))
+        # show keypoints 
+        to_save = iname + '_harrisz_plus_kornia.pdf'    
+        print(f"Plot keypoint ellipses in Kornia and save the result in {to_save}")
+        start = time.time()
+        # show keypoints with Kornia
+        img = cv2.cvtColor(cv2.imread(image), cv2.COLOR_BGR2RGB)    
+        visualize_LAF(K.image_to_tensor(img, False), lafs, 0)
+        plt.axis('off')    
+        # save the plot        
+        plt.savefig(to_save, dpi=150, bbox_inches='tight')
+        end = time.time()
+        print("Elapsed time: %s (plot)" % (end - start))
+        print("")
