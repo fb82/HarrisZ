@@ -243,7 +243,7 @@ def uniform_kpts(sz, kpt, max_kpts, max_kpts_cf, max_max_pts=np.inf, block_mem=1
 
 def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_scales=9, start_scale=3,
        dm_th=0.31, cf=3, xy_offset=0.0, max_max_pts=np.inf, block_mem=16*10**6, output_format='vgg'):
-    kpt = torch.zeros((0, 9), device=device)
+    kpt = torch.zeros((0, 10), device=device)
     i_scale = scale_base ** np.arange(0, n_scales)
     d_scale = i_scale * scale_ratio
     dx_dy = derivative(img)
@@ -280,8 +280,9 @@ def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_sc
         
         kp_index = kp[:, 0] * harris.shape[2] + kp[:, 1]
         kp_eli, kp_ratio = get_eli(dx2_dy2[0].flatten()[kp_index], dx2_dy2[1].flatten()[kp_index], dxy.flatten()[kp_index], i_scale[i] * cf)
+        hv = harris.flatten()[kp_index]        
         
-        kpt_ = torch.cat((kp_sub_pix[:,[1, 0]], kp_eli, kp_s, kp_ratio.unsqueeze(-1)), dim=1)
+        kpt_ = torch.cat((kp_sub_pix[:,[1, 0]], kp_eli, kp_s, kp_ratio.unsqueeze(-1), hv.unsqueeze(-1)), dim=1)
         kp_good = 1 - kp_ratio < scale_th
  
         kpt = torch.cat((kpt, kpt_[kp_good]))
@@ -294,16 +295,16 @@ def hz(img, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75, n_sc
     kpt[:, :2] = kpt[:, :2] + xy_offset
     if output_format == 'vgg':
         kpt[:, 2:5] = torch.linalg.inv(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2)).reshape(-1, 4)[:, [0, 1, 3]]
-        return kpt[:, :5]
+        return kpt[:, :5], kpt[:, -1]
     elif output_format == 'laf':
         kpt[:, 2:5] = kpt[:, 2:5] / cf
-        return kpt[:, :5]        
+        return kpt[:, :5], kpt[:, -1]        
     else:
         D, V = torch.linalg.eigh(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2))
         center = kpt[:, :2]
         axes = (cf / D)**0.5
         rotation = torch.atan2(V[:, 1, 0], V[:, 0, 0]) * 180 / np.pi
-        return {'center': center, 'axes': axes, 'rotation': rotation}
+        return {'center': center, 'axes': axes, 'rotation': rotation, 'response': kpt[:, -1]}
 
 
 def hz_plus(img, max_kpts=8000, fast_save_memory=False, scale_base=np.sqrt(2), scale_ratio=1/np.sqrt(2), scale_th=0.75,
@@ -423,16 +424,16 @@ def hz_plus(img, max_kpts=8000, fast_save_memory=False, scale_base=np.sqrt(2), s
     kpt[:, :2] = kpt[:, :2] + xy_offset
     if output_format == 'vgg':
         kpt[:, 2:5] = torch.linalg.inv(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2)).reshape(-1, 4)[:, [0, 1, 3]]
-        return kpt[:, :5]
+        return kpt[:, :5], kpt[:, -1]
     elif output_format == 'laf':
         kpt[:, 2:5] = kpt[:, 2:5] / cf
-        return kpt[:, :5]        
+        return kpt[:, :5], kpt[:, -1]        
     else:
         D, V = torch.linalg.eigh(kpt[:, [2, 3, 3, 4]].reshape(-1, 2, 2))
         center = kpt[:, :2]
         axes = (cf / D)**0.5
         rotation = torch.atan2(V[:, 1, 0], V[:, 0, 0]) * 180 / np.pi
-        return {'center': center, 'axes': axes, 'rotation': rotation}
+        return {'center': center, 'axes': axes, 'rotation': rotation, 'response': kpt[:, -1]}
 
     
 if __name__ == '__main__':
@@ -482,7 +483,7 @@ if __name__ == '__main__':
         # run and convert to laf
         img = load_to_tensor(image, grayscale=True).to(torch.float)
         start = time.time()
-        kpts = hz(img, output_format='laf', block_mem=block_memory, max_max_pts=max_pts)
+        kpts, responses = hz(img, output_format='laf', block_mem=block_memory, max_max_pts=max_pts)
         lafs = KF.ellipse_to_laf(kpts[None]) 
         end = time.time()
         print(f"Extracted keypoints: {kpts.shape[0]}")
@@ -525,7 +526,7 @@ if __name__ == '__main__':
         # run and convert to laf
         img = load_to_tensor(image).to(torch.float)
         start = time.time()
-        kpts = hz_plus(img, output_format='laf', block_mem=block_memory, max_max_pts=max_pts)
+        kpts, responses = hz_plus(img, output_format='laf', block_mem=block_memory, max_max_pts=max_pts)
         lafs = KF.ellipse_to_laf(kpts[None]) 
         end = time.time()
         print(f"Extracted keypoints: {kpts.shape[0]}")
