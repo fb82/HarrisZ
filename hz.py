@@ -106,13 +106,13 @@ def max_mask(img, rd, dm_mask, rad_max=3, block_mem=16*10**6, prev_filter={'k': 
 def sub_pix(img, kp):
     kp_sp = kp.type(torch.float)
     
-    r_mask = (kp[:,0] > 1) & (kp[:, 0] < img.shape[0] - 1)
+    r_mask = (kp[:,0] > 1) & (kp[:, 0] < img.shape[1] - 1)
     v  = img.flatten()[ kp[r_mask, 0]      * img.shape[2] + kp[r_mask, 1]]
     vl = img.flatten()[(kp[r_mask, 0] - 1) * img.shape[2] + kp[r_mask, 1]]
     vr = img.flatten()[(kp[r_mask, 0] + 1) * img.shape[2] + kp[r_mask, 1]]
     kp_sp[r_mask, 0] = kp[r_mask, 0] + (vr - vl) / (2 * (2*v - vl -vr))    
 
-    c_mask = (kp[:,1] > 1) & (kp[:, 1] < img.shape[1] - 1)
+    c_mask = (kp[:,1] > 1) & (kp[:, 1] < img.shape[2] - 1)
     v  = img.flatten()[kp[c_mask, 0] * img.shape[2] + kp[c_mask, 1]    ]
     vl = img.flatten()[kp[c_mask, 0] * img.shape[2] + kp[c_mask, 1] - 1]
     vr = img.flatten()[kp[c_mask, 0] * img.shape[2] + kp[c_mask, 1] + 1]
@@ -397,7 +397,7 @@ def hz_plus(img, max_kpts=8000, fast_save_memory=False, scale_base=np.sqrt(2), s
             double_adjust = 2
         d_scale_ = max(min_scale * scale_ratio, d_scale[i] / double_adjust)
         i_scale_ = max(min_scale, i_scale[i] / double_adjust)            
-        
+
         kp_sub_pix = sub_pix(harris, kp)
         kp_s = torch.tensor([i, d_scale_, i_scale_], device=device).repeat(kp.shape[0], 1)
 
